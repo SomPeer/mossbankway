@@ -430,7 +430,6 @@ class Candidate:
     notes: str = ""
     shots: list[bytes] = field(default_factory=list)
     uneven: bool = False  # the model's module scales the whole object unevenly (see uneven_scale)
-    coverage: float = 0.0  # share of non-white pixels in the judge's four front views (coverage guard)
 
 
 @dataclass
@@ -699,9 +698,6 @@ class Pipeline:
             gaps.append(one - two if parent_first else two - one)
             notes.append((f"from {angle}", parent_first, str(answer.get("issues", ""))))
         kept = bool(gaps) and sum(gaps) / len(gaps) >= -JUDGE_DRAW
-        if (kept and parent.coverage > 0 and child.coverage < (1 - COVERAGE_DROP) * parent.coverage
-                and sum(gaps) / len(gaps) < COVERAGE_CLEAR):  # coverage guard: a child that lost a fifth of its views
-            kept = False
         self.gate_notes = gate_notes(notes, kept)
         return kept
 
@@ -795,7 +791,6 @@ class Pipeline:
             return source, rejection.detail_json
         candidate = Candidate(name, source, view_sheet(views), grid, raw, views)
         candidate.shots = judge_shots(front)[:2]
-        candidate.coverage = coverage(front)
         candidate.uneven = uneven_scale(raw)
         return candidate
 
@@ -1047,8 +1042,6 @@ def run(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer, plan: St
 
 ROUND_COST = {("gpt-6-astra", "high"): (494, 10313), ("gpt-6.1-sol", "xhigh"): (10712, 9125), ("gpt-6.1-sol", "high"): (748, 9575)}
 SELECT_CALL_CREDITS = 15731
-COVERAGE_DROP = 0.2  # coverage guard: a child whose front-view coverage is below 80% of its parent's ...
-COVERAGE_CLEAR = 1.0  # ... is kept only when the gate's mean gap favours it by at least this many penalty points
 MODULE_GROWTH = 1.15
 
 
@@ -1185,16 +1178,6 @@ def even_scale(raw: str) -> str:
             return "" if len(values) == 3 and len(set(values)) > 1 else m.group(0)
         out = re.sub(rf"\b{n}\.scale\.set\(([^()]*)\)\s*;?", drop, out)
     return out
-
-
-def coverage(front: bytes) -> float:
-    """Share of non-white pixels in the judge's four front views on white (0 when the image cannot be read)."""
-    try:
-        histogram = Image.open(io.BytesIO(front)).convert("L").histogram()
-    except (OSError, ValueError):
-        return 0.0
-    total = sum(histogram)
-    return sum(histogram[:245]) / total if total else 0.0
 
 
 def judge_shots(front: bytes) -> list[bytes]:
