@@ -1304,6 +1304,13 @@ class Pipeline:
                 even = even.parent
             if not even.uneven:
                 winner = even
+            elif winner.raw:  # every module of the lineage scales the whole object unevenly: drop that scale (uniform scale only)
+                evened = even_scale(winner.raw)
+                if evened != winner.raw:
+                    outcome = self.render_module(winner.name + "e", normalize(evened, self.wrapper), evened)
+                    if isinstance(outcome, Candidate) and not outcome.uneven:
+                        outcome.parent = winner.parent
+                        winner = outcome
             self.best_so_far = winner.source
             for index in range(len(plan.steps), len(plan.steps) + plan.post_pick_steps):
                 kept = self.post_pick(pool, winner, index, plan.post_pick_effort)
@@ -1511,10 +1518,12 @@ _NUM = r"-?\d+(?:\.\d+)?(?:e-?\d+)?"
 
 def uneven_scale(raw: str) -> bool:
     """Whether the model's module scales the whole object unevenly: a scale with unequal axes on the returned group or on
-    the chain of groups that holds the whole object (each the only child of the one before)."""
+    the chain of groups that holds the whole object (each the only child of the one before). Children are read from the body
+    of generate() only, so a helper function that names its own parameter like the returned group cannot hide the chain."""
     if not raw:
         return False
     top = "root"
+    scope = raw
     start = raw.find("export default function")
     if start >= 0 and raw.find("{", start) >= 0:
         opened = raw.find("{", start)
@@ -1527,10 +1536,11 @@ def uneven_scale(raw: str) -> bool:
                 if depth == 0:
                     end = at
                     break
-        returned = re.findall(r"\breturn\s+([A-Za-z_$][\w$]*)\s*;", raw[opened:end])
+        scope = raw[opened:end]
+        returned = re.findall(r"\breturn\s+([A-Za-z_$][\w$]*)\s*;", scope)
         top = returned[-1] if returned else top
     kids: dict[str, list[str]] = {}
-    for parent, args in re.findall(r"\b([A-Za-z_$][\w$]*)\.add\(([^()]*(?:\([^()]*\)[^()]*)*)\)", raw):
+    for parent, args in re.findall(r"\b([A-Za-z_$][\w$]*)\.add\(([^()]*(?:\([^()]*\)[^()]*)*)\)", scope):
         for arg in args.split(","):
             arg = arg.strip()
             kids.setdefault(parent, []).append(arg if re.fullmatch(r"[A-Za-z_$][\w$]*", arg) else "<expr>")
@@ -1547,6 +1557,49 @@ def uneven_scale(raw: str) -> bool:
             if len(values) == 3 and len(set(values)) > 1:
                 return True
     return False
+
+def even_scale(raw: str) -> str:
+    """The model's module with the unequal-axis scales removed from the whole-object chain (the groups uneven_scale checks),
+    for the rare lineage in which every module scales the whole object unevenly. Each part keeps its own geometry; the
+    wrapper's fit sizes the result uniformly."""
+    if not raw or not uneven_scale(raw):
+        return raw
+    top = "root"
+    scope = raw
+    start = raw.find("export default function")
+    if start >= 0 and raw.find("{", start) >= 0:
+        opened = raw.find("{", start)
+        depth, end = 0, len(raw)
+        for at in range(opened, len(raw)):
+            if raw[at] == "{":
+                depth += 1
+            elif raw[at] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = at
+                    break
+        scope = raw[opened:end]
+        returned = re.findall(r"\breturn\s+([A-Za-z_$][\w$]*)\s*;", scope)
+        top = returned[-1] if returned else top
+    kids: dict[str, list[str]] = {}
+    for parent, args in re.findall(r"\b([A-Za-z_$][\w$]*)\.add\(([^()]*(?:\([^()]*\)[^()]*)*)\)", scope):
+        for arg in args.split(","):
+            arg = arg.strip()
+            kids.setdefault(parent, []).append(arg if re.fullmatch(r"[A-Za-z_$][\w$]*", arg) else "<expr>")
+    chain, name = [top], top
+    while len(kids.get(name, [])) == 1 and kids[name][0] != "<expr>" and len(chain) < 6:
+        name = kids[name][0]
+        chain.append(name)
+    out = raw
+    for name in chain:
+        n = re.escape(name)
+        out = re.sub(rf"\b{n}\.scale\.[xyz]\s*=(?!=)[^;\n]*;?", "", out)
+
+        def drop(m: re.Match) -> str:
+            values = [a.strip() for a in m.group(1).split(",")]
+            return "" if len(values) == 3 and len(set(values)) > 1 else m.group(0)
+        out = re.sub(rf"\b{n}\.scale\.set\(([^()]*)\)\s*;?", drop, out)
+    return out
 
 
 def judge_shots(front: bytes) -> list[bytes]:
